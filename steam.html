@@ -1,0 +1,586 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ระบบเช็คชื่อและจัดการกิจกรรมชุมนุม</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Thai:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  body { font-family: 'Noto Sans Thai', system-ui, sans-serif; }
+  .scroll-thin::-webkit-scrollbar { height: 6px; width: 6px; }
+  .scroll-thin::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 9px; }
+</style>
+</head>
+<body class="bg-slate-50 text-slate-800 min-h-screen">
+
+<!-- ===================================================================
+     วิธีตั้งค่า Firebase (อ่านก่อนใช้งาน)
+     -------------------------------------------------------------------
+     1) เข้า https://console.firebase.google.com แล้วสร้างโปรเจกต์ใหม่
+     2) เมนู Build > Firestore Database > Create database
+        (เริ่มด้วย "Test mode" เพื่อทดลอง แล้วค่อยปรับ Rules ภายหลัง)
+     3) Project settings (ไอคอนเฟือง) > Your apps > เลือก Web (</>) > Register app
+        จะได้ค่า firebaseConfig ให้ก๊อปมาวางในตัวแปร FIREBASE_CONFIG ด้านล่าง
+        หรือกดปุ่ม "ตั้งค่า" ในเว็บแล้ววาง JSON ก็ได้ (เก็บไว้ในเบราว์เซอร์เครื่องนั้น)
+     4) แนะนำ Firestore Rules สำหรับใช้งานในห้องเรียน (ปรับให้เหมาะสมกับความปลอดภัยที่ต้องการ):
+          rules_version = '2';
+          service cloud.firestore {
+            match /databases/{database}/documents {
+              match /{document=**} { allow read, write: if true; }
+            }
+          }
+        ** กฎนี้เปิดให้ทุกคนที่รู้ลิงก์เขียนได้ ควรเพิ่ม Authentication ถ้าใช้งานจริงจัง **
+     5) ถ้ายังไม่ตั้งค่า ระบบจะทำงาน "โหมดทดลอง" เก็บข้อมูลในเครื่อง (localStorage)
+        ยังไม่ซิงก์ข้ามอุปกรณ์
+     =================================================================== -->
+<script>
+const FIREBASE_CONFIG = {
+  apiKey: "AIzaSyCuQxWBDe3U_WIofxfC7XDIkGCUE41Knj4",
+  authDomain: "steam-check-4ce37.firebaseapp.com",
+  projectId: "steam-check-4ce37",
+  storageBucket: "steam-check-4ce37.firebasestorage.app",
+  messagingSenderId: "1067415062465",
+  appId: "1:1067415062465:web:006fdb2e479c05067cd140",
+  measurementId: "G-8S488318C0"
+};
+</script>
+
+<div id="app"></div>
+<div id="modal"></div>
+<div id="toast" class="fixed bottom-4 left-1/2 -translate-x-1/2 z-[60]"></div>
+
+<script>
+/* ============================ ค่าคงที่ ============================ */
+const STATUS = {
+  present: { label: 'มา',  on: 'bg-emerald-500 text-white border-emerald-500', bar: 'bg-emerald-500', text: 'text-emerald-600' },
+  late:    { label: 'สาย', on: 'bg-amber-500 text-white border-amber-500',     bar: 'bg-amber-400',   text: 'text-amber-600' },
+  absent:  { label: 'ขาด', on: 'bg-rose-500 text-white border-rose-500',       bar: 'bg-rose-500',    text: 'text-rose-600' },
+  leave:   { label: 'ลา',  on: 'bg-violet-500 text-white border-violet-500',   bar: 'bg-violet-400',  text: 'text-violet-600' }
+};
+const STATUS_KEYS = Object.keys(STATUS);
+const MALE = 'ชาย', FEMALE = 'หญิง';
+
+/* ============================ State ============================ */
+const S = {
+  students: [], weeks: [], weekId: null,
+  gender: 'all', search: '', view: 'attendance',
+  dashScope: 'term', dashGender: 'all',
+  importGender: MALE, importRows: [], importName: '',
+  mode: 'local'
+};
+
+/* ============================ Utilities ============================ */
+const $ = (s) => document.querySelector(s);
+const esc = (v) => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const pctTxt = (n) => n === null || n === undefined ? '–' : n.toFixed(1) + '%';
+function toast(msg, ok = true) {
+  const t = $('#toast');
+  t.innerHTML = `<div class="px-4 py-2 rounded-xl shadow-lg text-white text-sm ${ok ? 'bg-slate-800' : 'bg-rose-600'}">${esc(msg)}</div>`;
+  clearTimeout(toast._t); toast._t = setTimeout(() => t.innerHTML = '', 2600);
+}
+function thaiDate(d) {
+  if (!d) return 'ยังไม่ระบุวันที่';
+  const dt = new Date(d + 'T00:00:00');
+  return isNaN(dt) ? d : dt.toLocaleDateString('th-TH', { year: 'numeric', month: 'long', day: 'numeric', weekday: 'long' });
+}
+const genderBadge = (g) => g === MALE
+  ? '<span class="inline-block px-2 py-0.5 rounded-full text-xs font-medium bg-sky-100 text-sky-700 border border-sky-200">ชาย</span>'
+  : '<span class="inline-block px-2 py-0.5 rounded-full text-xs font-medium bg-pink-100 text-pink-700 border border-pink-200">หญิง</span>';
+const sortStudents = (a, b) => (a.cls || '').localeCompare(b.cls || '', 'th') || String(a.id).localeCompare(String(b.id), 'th', { numeric: true });
+const sortWeeks = (a, b) => (a.number || 0) - (b.number || 0);
+const currentWeek = () => S.weeks.find(w => w.id === S.weekId) || null;
+const recOf = (w, id) => (w && w.records && w.records[id]) || null;
+
+/* ============================ Data Layer ============================ */
+const Store = {
+  db: null, local: { students: {}, weeks: {} },
+
+  init() {
+    let cfg = FIREBASE_CONFIG;
+    try { const saved = JSON.parse(localStorage.getItem('club_fb_config') || 'null'); if (saved && saved.projectId) cfg = saved; } catch (e) {}
+    if (cfg && cfg.apiKey && cfg.projectId) {
+      try {
+        firebase.initializeApp(cfg);
+        this.db = firebase.firestore();
+        S.mode = 'firebase';
+        this.db.collection('students').onSnapshot(snap => {
+          S.students = snap.docs.map(d => ({ id: d.id, ...d.data() })).sort(sortStudents);
+          render();
+        }, err => toast('เชื่อมต่อ Firebase ไม่สำเร็จ: ' + err.message, false));
+        this.db.collection('weeks').onSnapshot(snap => {
+          S.weeks = snap.docs.map(d => ({ id: d.id, ...d.data() })).sort(sortWeeks);
+          ensureWeek(); render();
+        }, err => toast('เชื่อมต่อ Firebase ไม่สำเร็จ: ' + err.message, false));
+        return;
+      } catch (e) { console.error(e); toast('Firebase Config ไม่ถูกต้อง ใช้โหมดทดลองแทน', false); }
+    }
+    S.mode = 'local';
+    this.loadLocal();
+    window.addEventListener('storage', (e) => { if (e.key === 'club_data') { this.loadLocal(); render(); } });
+  },
+  loadLocal() {
+    try { this.local = JSON.parse(localStorage.getItem('club_data')) || { students: {}, weeks: {} }; } catch (e) { this.local = { students: {}, weeks: {} }; }
+    this.local.students ||= {}; this.local.weeks ||= {};
+    this.syncState();
+  },
+  syncState() {
+    S.students = Object.entries(this.local.students).map(([id, v]) => ({ id, ...v })).sort(sortStudents);
+    S.weeks = Object.entries(this.local.weeks).map(([id, v]) => ({ id, ...v })).sort(sortWeeks);
+    ensureWeek();
+  },
+  saveLocal() { localStorage.setItem('club_data', JSON.stringify(this.local)); this.syncState(); render(); },
+
+  async addStudents(list) {
+    if (S.mode === 'firebase') {
+      for (let i = 0; i < list.length; i += 400) {
+        const batch = this.db.batch();
+        list.slice(i, i + 400).forEach(s => batch.set(this.db.collection('students').doc(s.id), { name: s.name, cls: s.cls, gender: s.gender }, { merge: true }));
+        await batch.commit();
+      }
+    } else {
+      list.forEach(s => this.local.students[s.id] = { name: s.name, cls: s.cls, gender: s.gender });
+      this.saveLocal();
+    }
+  },
+  async deleteStudent(id) {
+    if (S.mode === 'firebase') await this.db.collection('students').doc(id).delete();
+    else { delete this.local.students[id]; this.saveLocal(); }
+  },
+  async setGender(id, gender) {
+    if (S.mode === 'firebase') await this.db.collection('students').doc(id).update({ gender });
+    else { this.local.students[id].gender = gender; this.saveLocal(); }
+  },
+  async clearStudents() {
+    if (S.mode === 'firebase') {
+      const snap = await this.db.collection('students').get();
+      for (let i = 0; i < snap.docs.length; i += 400) {
+        const b = this.db.batch(); snap.docs.slice(i, i + 400).forEach(d => b.delete(d.ref)); await b.commit();
+      }
+    } else { this.local.students = {}; this.saveLocal(); }
+  },
+  async saveWeek(w) {
+    const data = { number: w.number, date: w.date, topic: w.topic, supervisors: w.supervisors };
+    if (S.mode === 'firebase') await this.db.collection('weeks').doc(w.id).set(data, { merge: true });
+    else { this.local.weeks[w.id] = { ...(this.local.weeks[w.id] || { records: {} }), ...data }; this.saveLocal(); }
+  },
+  async deleteWeek(id) {
+    if (S.mode === 'firebase') await this.db.collection('weeks').doc(id).delete();
+    else { delete this.local.weeks[id]; this.saveLocal(); }
+  },
+  // map: { studentId: 'present' | 'late' | 'absent' | 'leave' | null(ล้างค่า) }
+  async setRecords(weekId, map) {
+    if (S.mode === 'firebase') {
+      const rec = {};
+      Object.entries(map).forEach(([id, v]) => rec[id] = v === null ? firebase.firestore.FieldValue.delete() : v);
+      await this.db.collection('weeks').doc(weekId).set({ records: rec }, { merge: true });
+    } else {
+      const w = this.local.weeks[weekId]; w.records ||= {};
+      Object.entries(map).forEach(([id, v]) => { if (v === null) delete w.records[id]; else w.records[id] = v; });
+      this.saveLocal();
+    }
+  }
+};
+
+function ensureWeek() {
+  if (!S.weeks.find(w => w.id === S.weekId)) S.weekId = S.weeks.length ? S.weeks[S.weeks.length - 1].id : null;
+}
+
+/* ============================ Stats ============================ */
+function tally(studs, weeks) {
+  const c = { present: 0, late: 0, absent: 0, leave: 0 };
+  weeks.forEach(w => studs.forEach(s => { const r = recOf(w, s.id); if (r && c[r] !== undefined) c[r]++; }));
+  c.total = c.present + c.late + c.absent + c.leave;
+  c.pct = c.total ? (c.present + c.late) / c.total * 100 : null; // มา+สาย นับเป็นเข้าเรียน
+  return c;
+}
+const byGender = (g) => g === 'all' ? S.students : S.students.filter(s => s.gender === g);
+
+/* ============================ Render ============================ */
+function render() {
+  const modeBadge = S.mode === 'firebase'
+    ? '<span class="flex items-center gap-1.5 text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 px-2.5 py-1 rounded-full"><span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>ซิงก์เรียลไทม์ (Firebase)</span>'
+    : '<span class="flex items-center gap-1.5 text-xs text-amber-700 bg-amber-50 border border-amber-200 px-2.5 py-1 rounded-full"><span class="w-2 h-2 rounded-full bg-amber-500"></span>โหมดทดลอง (เก็บในเครื่อง)</span>';
+  const tabs = [['attendance', 'เช็คชื่อ'], ['weeks', 'สัปดาห์กิจกรรม'], ['dashboard', 'แดชบอร์ด'], ['students', 'สมาชิก']];
+  $('#app').innerHTML = `
+  <header class="bg-gradient-to-r from-indigo-600 to-blue-600 text-white">
+    <div class="max-w-6xl mx-auto px-4 py-4 flex flex-wrap items-center justify-between gap-3">
+      <div>
+        <h1 class="text-xl sm:text-2xl font-bold">ระบบเช็คชื่อและจัดการกิจกรรมชุมนุม</h1>
+        <p class="text-indigo-100 text-sm">Club Attendance &amp; Weekly Management</p>
+      </div>
+      <div class="flex items-center gap-2">${modeBadge}
+        <button data-act="open-settings" class="text-sm bg-white/15 hover:bg-white/25 px-3 py-1.5 rounded-lg">ตั้งค่า</button>
+      </div>
+    </div>
+    <nav class="max-w-6xl mx-auto px-4 flex gap-1 overflow-x-auto scroll-thin">
+      ${tabs.map(([k, l]) => `<button data-act="view" data-v="${k}" class="px-4 py-2.5 text-sm font-medium whitespace-nowrap rounded-t-xl ${S.view === k ? 'bg-slate-50 text-indigo-700' : 'text-indigo-100 hover:bg-white/10'}">${l}</button>`).join('')}
+    </nav>
+  </header>
+  <main class="max-w-6xl mx-auto px-4 py-5">
+    ${S.view === 'attendance' ? viewAttendance() : S.view === 'weeks' ? viewWeeks() : S.view === 'dashboard' ? viewDashboard() : viewStudents()}
+  </main>`;
+}
+
+/* ---------- หน้าเช็คชื่อ ---------- */
+function weekSelector() {
+  if (!S.weeks.length) return '';
+  const idx = S.weeks.findIndex(w => w.id === S.weekId);
+  return `<div class="flex items-center gap-2">
+    <button data-act="prev-week" ${idx <= 0 ? 'disabled' : ''} class="w-9 h-9 rounded-lg border bg-white hover:bg-slate-100 disabled:opacity-30">‹</button>
+    <select data-act="select-week" class="flex-1 min-w-0 h-9 px-3 rounded-lg border bg-white text-sm font-medium">
+      ${S.weeks.map(w => `<option value="${esc(w.id)}" ${w.id === S.weekId ? 'selected' : ''}>วีค ${w.number}${w.date ? ' · ' + esc(w.date) : ''}</option>`).join('')}
+    </select>
+    <button data-act="next-week" ${idx >= S.weeks.length - 1 ? 'disabled' : ''} class="w-9 h-9 rounded-lg border bg-white hover:bg-slate-100 disabled:opacity-30">›</button>
+  </div>`;
+}
+function genderTabs(current, act) {
+  const items = [['all', 'ทั้งหมด', S.students.length], [MALE, 'เฉพาะนักเรียนชาย', byGender(MALE).length], [FEMALE, 'เฉพาะนักเรียนหญิง', byGender(FEMALE).length]];
+  const col = { all: 'bg-indigo-600', [MALE]: 'bg-sky-500', [FEMALE]: 'bg-pink-500' };
+  return `<div class="flex gap-1.5 overflow-x-auto scroll-thin">${items.map(([k, l, n]) =>
+    `<button data-act="${act}" data-g="${k}" class="px-3.5 py-1.5 rounded-full text-sm font-medium whitespace-nowrap border ${current === k ? col[k] + ' text-white border-transparent' : 'bg-white text-slate-600 hover:bg-slate-100'}">${l} <span class="opacity-80">(${n})</span></button>`).join('')}</div>`;
+}
+function viewAttendance() {
+  if (!S.weeks.length) return emptyBox('ยังไม่มีสัปดาห์กิจกรรม', 'เพิ่มสัปดาห์แรกเพื่อเริ่มเช็คชื่อ', `<button data-act="goto-weeks" class="mt-3 px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm">ไปหน้าสัปดาห์กิจกรรม</button>`);
+  if (!S.students.length) return emptyBox('ยังไม่มีรายชื่อสมาชิก', 'นำเข้าไฟล์ Excel/CSV เพื่อเพิ่มรายชื่อ', `<button data-act="open-import" class="mt-3 px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm">นำเข้ารายชื่อ</button>`);
+  const w = currentWeek();
+  return `
+  <div class="bg-white rounded-2xl shadow-sm border p-4 mb-4">
+    <div class="grid md:grid-cols-2 gap-4">
+      <div>${weekSelector()}
+        <p class="mt-3 text-sm text-slate-500">${thaiDate(w.date)}</p>
+        <p class="font-semibold mt-1">${esc(w.topic) || '<span class="text-slate-400 font-normal">ยังไม่ระบุหัวข้อกิจกรรม</span>'}</p>
+      </div>
+      <div>
+        <p class="text-xs text-slate-500 mb-1.5">ผู้ดูแลรับผิดชอบประจำสัปดาห์</p>
+        <div class="flex flex-wrap gap-1.5">${(w.supervisors || []).length ? w.supervisors.map(n => `<span class="px-2.5 py-1 bg-indigo-50 text-indigo-700 rounded-full text-sm">${esc(n)}</span>`).join('') : '<span class="text-sm text-slate-400">ยังไม่ระบุ</span>'}</div>
+      </div>
+    </div>
+  </div>
+  <div class="bg-white rounded-2xl shadow-sm border p-4">
+    <div class="mb-3">${genderTabs(S.gender, 'gender-tab')}</div>
+    <div class="flex flex-wrap gap-2 mb-3">
+      <input id="search" value="${esc(S.search)}" placeholder="ค้นหาชื่อ / รหัส / ห้อง" class="flex-1 min-w-[180px] h-10 px-3 rounded-lg border text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300">
+      <button data-act="mark-all" class="h-10 px-4 rounded-lg bg-emerald-500 hover:bg-emerald-600 text-white text-sm font-medium">✓ กดมาทั้งหมด${S.gender === 'all' ? '' : ' (' + S.gender + ')'}</button>
+      <button data-act="clear-all" class="h-10 px-3 rounded-lg border text-sm text-slate-600 hover:bg-slate-100">ล้างค่า</button>
+    </div>
+    <div id="list">${attendanceList()}</div>
+  </div>`;
+}
+function filteredStudents() {
+  const q = S.search.trim().toLowerCase();
+  return byGender(S.gender).filter(s => !q || (s.name + ' ' + s.id + ' ' + (s.cls || '')).toLowerCase().includes(q));
+}
+function attendanceList() {
+  const w = currentWeek(); const list = filteredStudents();
+  const t = tally(list, [w]);
+  const summary = `<div class="flex flex-wrap gap-x-4 gap-y-1 text-sm mb-3 text-slate-600">
+    <span>แสดง ${list.length} คน</span>
+    ${STATUS_KEYS.map(k => `<span class="${STATUS[k].text}">${STATUS[k].label} ${t[k]}</span>`).join('')}
+    <span class="text-slate-400">ยังไม่เช็ค ${list.length - t.total}</span></div>`;
+  if (!list.length) return summary + '<p class="text-center text-slate-400 py-8 text-sm">ไม่พบรายชื่อ</p>';
+  return summary + `<div class="divide-y">${list.map((s, i) => {
+    const cur = recOf(w, s.id);
+    return `<div class="py-2.5 flex flex-wrap items-center gap-x-3 gap-y-2">
+      <span class="w-7 text-xs text-slate-400 text-right">${i + 1}</span>
+      <div class="flex-1 min-w-[180px]">
+        <div class="flex items-center gap-2 flex-wrap"><span class="font-medium text-sm">${esc(s.name)}</span>${genderBadge(s.gender)}</div>
+        <div class="text-xs text-slate-500">รหัส ${esc(s.id)}${s.cls ? ' · ' + esc(s.cls) : ''}</div>
+      </div>
+      <div class="flex gap-1">${STATUS_KEYS.map(k => `<button data-act="set-status" data-id="${esc(s.id)}" data-s="${k}" class="w-12 h-9 rounded-lg border text-sm font-medium ${cur === k ? STATUS[k].on : 'bg-white text-slate-500 hover:bg-slate-100'}">${STATUS[k].label}</button>`).join('')}</div>
+    </div>`;
+  }).join('')}</div>`;
+}
+
+/* ---------- หน้าสัปดาห์กิจกรรม ---------- */
+function viewWeeks() {
+  return `
+  <div class="flex items-center justify-between mb-4">
+    <h2 class="text-lg font-bold">สัปดาห์กิจกรรมและผู้ดูแล</h2>
+    <button data-act="add-week" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-sm font-medium">+ เพิ่มสัปดาห์ใหม่</button>
+  </div>
+  ${S.weeks.length ? `<div class="grid md:grid-cols-2 gap-3">${S.weeks.map(w => {
+    const t = tally(S.students, [w]);
+    return `<div class="bg-white rounded-2xl border shadow-sm p-4">
+      <div class="flex items-start justify-between gap-2">
+        <div><span class="text-xs px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700 font-medium">วีค ${w.number}</span>
+        <p class="text-sm text-slate-500 mt-1.5">${thaiDate(w.date)}</p></div>
+        <div class="text-right"><p class="text-xs text-slate-400">เข้าเรียน</p><p class="font-bold text-lg">${pctTxt(t.pct)}</p></div>
+      </div>
+      <p class="font-semibold mt-2">${esc(w.topic) || '<span class="text-slate-400 font-normal">ยังไม่ระบุหัวข้อ</span>'}</p>
+      <div class="flex flex-wrap gap-1.5 mt-2">${(w.supervisors || []).map(n => `<span class="px-2 py-0.5 bg-slate-100 rounded-full text-xs">${esc(n)}</span>`).join('') || '<span class="text-xs text-slate-400">ยังไม่ระบุผู้ดูแล</span>'}</div>
+      <div class="flex gap-2 mt-3">
+        <button data-act="check-week" data-id="${esc(w.id)}" class="px-3 py-1.5 rounded-lg bg-emerald-500 text-white text-sm">เช็คชื่อ</button>
+        <button data-act="edit-week" data-id="${esc(w.id)}" class="px-3 py-1.5 rounded-lg border text-sm hover:bg-slate-100">แก้ไข</button>
+        <button data-act="del-week" data-id="${esc(w.id)}" class="px-3 py-1.5 rounded-lg border border-rose-200 text-rose-600 text-sm hover:bg-rose-50">ลบ</button>
+      </div></div>`;
+  }).join('')}</div>` : emptyBox('ยังไม่มีสัปดาห์กิจกรรม', 'กด "เพิ่มสัปดาห์ใหม่" เพื่อเริ่มต้น')}`;
+}
+function weekModal(id) {
+  const w = id ? S.weeks.find(x => x.id === id) : null;
+  const num = w ? w.number : (S.weeks.reduce((m, x) => Math.max(m, x.number || 0), 0) + 1);
+  openModal(`
+    <h3 class="text-lg font-bold mb-3">${w ? 'แก้ไข' : 'เพิ่ม'}สัปดาห์ที่ ${num}</h3>
+    <div class="space-y-3">
+      <div><label class="text-sm text-slate-600">วันที่</label><input id="w-date" type="date" value="${esc(w ? w.date : new Date().toISOString().slice(0, 10))}" class="w-full h-10 px-3 rounded-lg border mt-1"></div>
+      <div><label class="text-sm text-slate-600">หัวข้อ / รายละเอียดกิจกรรม</label><textarea id="w-topic" rows="3" class="w-full px-3 py-2 rounded-lg border mt-1" placeholder="เช่น ฝึกเขียนโปรแกรมเบื้องต้น">${esc(w ? w.topic : '')}</textarea></div>
+      <div><label class="text-sm text-slate-600">ผู้ดูแลรับผิดชอบ (คั่นด้วยเครื่องหมายจุลภาค , หรือขึ้นบรรทัดใหม่)</label><textarea id="w-sup" rows="2" class="w-full px-3 py-2 rounded-lg border mt-1" placeholder="สมชาย ใจดี, สมหญิง รักเรียน">${esc(w ? (w.supervisors || []).join(', ') : '')}</textarea></div>
+    </div>
+    <div class="flex justify-end gap-2 mt-5">
+      <button data-act="close-modal" class="px-4 py-2 rounded-lg border text-sm">ยกเลิก</button>
+      <button data-act="save-week" data-id="${esc(w ? w.id : '')}" data-num="${num}" class="px-4 py-2 rounded-lg bg-indigo-600 text-white text-sm font-medium">บันทึก</button>
+    </div>`);
+}
+
+/* ---------- แดชบอร์ด ---------- */
+function stackBar(t) {
+  if (!t.total) return '<div class="h-3 rounded-full bg-slate-100"></div>';
+  return `<div class="h-3 rounded-full overflow-hidden flex bg-slate-100">${STATUS_KEYS.map(k => `<div class="${STATUS[k].bar}" style="width:${t[k] / t.total * 100}%"></div>`).join('')}</div>`;
+}
+function viewDashboard() {
+  if (!S.students.length || !S.weeks.length) return emptyBox('ยังไม่มีข้อมูลสำหรับสรุป', 'ต้องมีรายชื่อสมาชิกและสัปดาห์กิจกรรมก่อน');
+  const w = currentWeek();
+  const weeks = S.dashScope === 'week' ? [w] : S.weeks;
+  const all = tally(S.students, weeks), m = tally(byGender(MALE), weeks), f = tally(byGender(FEMALE), weeks);
+  const gCard = (label, n, t, color, ring) => `
+    <div class="bg-white rounded-2xl border shadow-sm p-4 border-t-4 ${ring}">
+      <div class="flex justify-between items-baseline"><h4 class="font-semibold ${color}">${label} <span class="text-slate-400 text-sm font-normal">(${n} คน)</span></h4>
+      <span class="text-2xl font-bold ${color}">${pctTxt(t.pct)}</span></div>
+      <div class="my-3">${stackBar(t)}</div>
+      <div class="grid grid-cols-4 gap-2 text-center text-sm">${STATUS_KEYS.map(k => `<div><p class="${STATUS[k].text} font-bold text-lg">${t[k]}</p><p class="text-xs text-slate-500">${STATUS[k].label}</p></div>`).join('')}</div>
+    </div>`;
+  // รายบุคคลสะสม
+  const people = byGender(S.dashGender).map(s => ({ s, t: tally([s], S.weeks) })).sort((a, b) => (a.t.pct ?? 101) - (b.t.pct ?? 101));
+  // แนวโน้มรายสัปดาห์
+  const trend = S.weeks.map(wk => ({ wk, m: tally(byGender(MALE), [wk]).pct, f: tally(byGender(FEMALE), [wk]).pct }));
+  const bar = (v, c) => `<div class="flex items-center gap-2"><div class="flex-1 h-2.5 bg-slate-100 rounded-full overflow-hidden"><div class="${c} h-full" style="width:${v || 0}%"></div></div><span class="text-xs w-12 text-right text-slate-600">${pctTxt(v)}</span></div>`;
+  return `
+  <div class="flex flex-wrap items-center justify-between gap-2 mb-4">
+    <h2 class="text-lg font-bold">แดชบอร์ดสถิติการมาเรียน</h2>
+    <div class="flex gap-1.5">
+      <button data-act="scope" data-v="term" class="px-3.5 py-1.5 rounded-full text-sm border ${S.dashScope === 'term' ? 'bg-indigo-600 text-white border-transparent' : 'bg-white'}">ทั้งเทอม</button>
+      <button data-act="scope" data-v="week" class="px-3.5 py-1.5 rounded-full text-sm border ${S.dashScope === 'week' ? 'bg-indigo-600 text-white border-transparent' : 'bg-white'}">เฉพาะวีค ${w ? w.number : ''}</button>
+    </div>
+  </div>
+  <div class="grid grid-cols-2 md:grid-cols-5 gap-3 mb-4">
+    <div class="col-span-2 md:col-span-1 bg-indigo-600 text-white rounded-2xl p-4"><p class="text-indigo-100 text-sm">อัตราเข้าเรียนรวม</p><p class="text-3xl font-bold mt-1">${pctTxt(all.pct)}</p></div>
+    ${STATUS_KEYS.map(k => `<div class="bg-white border rounded-2xl p-4"><p class="text-sm text-slate-500">${STATUS[k].label}</p><p class="text-2xl font-bold ${STATUS[k].text}">${all[k]}</p></div>`).join('')}
+  </div>
+  <p class="text-xs text-slate-500 mb-4">* อัตราเข้าเรียน = (มา + สาย) ÷ จำนวนที่เช็คชื่อแล้ว (ไม่นับรายการที่ยังไม่ได้เช็ค)</p>
+
+  <h3 class="font-semibold mb-2">เปรียบเทียบ นักเรียนชาย VS นักเรียนหญิง</h3>
+  <div class="grid md:grid-cols-2 gap-3 mb-5">
+    ${gCard('นักเรียนชาย', byGender(MALE).length, m, 'text-sky-600', 'border-sky-400')}
+    ${gCard('นักเรียนหญิง', byGender(FEMALE).length, f, 'text-pink-600', 'border-pink-400')}
+  </div>
+
+  <div class="bg-white rounded-2xl border shadow-sm p-4 mb-5">
+    <h3 class="font-semibold mb-3">แนวโน้มรายสัปดาห์ <span class="text-xs font-normal text-slate-400">(<span class="text-sky-600">■ ชาย</span> <span class="text-pink-600">■ หญิง</span>)</span></h3>
+    <div class="space-y-3">${trend.map(({ wk, m, f }) => `<div class="grid grid-cols-[56px_1fr] gap-3 items-center"><span class="text-sm font-medium">วีค ${wk.number}</span><div class="space-y-1">${bar(m, 'bg-sky-400')}${bar(f, 'bg-pink-400')}</div></div>`).join('')}</div>
+  </div>
+
+  <div class="bg-white rounded-2xl border shadow-sm p-4">
+    <div class="flex flex-wrap items-center justify-between gap-2 mb-3">
+      <h3 class="font-semibold">เปอร์เซ็นต์การเข้าเรียนสะสมรายบุคคล</h3>
+      ${genderTabs(S.dashGender, 'dash-gender')}
+    </div>
+    <div class="overflow-x-auto scroll-thin"><table class="w-full text-sm">
+      <thead><tr class="text-left text-slate-500 border-b"><th class="py-2 pr-2">รหัส</th><th class="pr-2">ชื่อ-นามสกุล</th><th class="pr-2">เพศ</th><th class="pr-2">ชั้น</th><th class="pr-2 text-center">มา</th><th class="pr-2 text-center">สาย</th><th class="pr-2 text-center">ขาด</th><th class="pr-2 text-center">ลา</th><th class="min-w-[140px]">เข้าเรียนสะสม</th></tr></thead>
+      <tbody>${people.map(({ s, t }) => `<tr class="border-b last:border-0">
+        <td class="py-2 pr-2 text-slate-500">${esc(s.id)}</td><td class="pr-2 font-medium">${esc(s.name)}</td><td class="pr-2">${genderBadge(s.gender)}</td><td class="pr-2 text-slate-500">${esc(s.cls)}</td>
+        <td class="text-center">${t.present}</td><td class="text-center">${t.late}</td><td class="text-center">${t.absent}</td><td class="text-center">${t.leave}</td>
+        <td><div class="flex items-center gap-2"><div class="flex-1 h-2 bg-slate-100 rounded-full overflow-hidden"><div class="h-full ${t.pct !== null && t.pct < 80 ? 'bg-rose-500' : 'bg-emerald-500'}" style="width:${t.pct || 0}%"></div></div><span class="w-12 text-right ${t.pct !== null && t.pct < 80 ? 'text-rose-600 font-semibold' : ''}">${pctTxt(t.pct)}</span></div></td></tr>`).join('')}</tbody>
+    </table></div>
+    <p class="text-xs text-slate-400 mt-2">เรียงจากอัตราเข้าเรียนต่ำไปสูง · แถบสีแดงคือต่ำกว่า 80%</p>
+  </div>`;
+}
+
+/* ---------- หน้าสมาชิก ---------- */
+function viewStudents() {
+  return `
+  <div class="flex flex-wrap items-center justify-between gap-2 mb-4">
+    <h2 class="text-lg font-bold">รายชื่อสมาชิกชุมนุม <span class="text-slate-400 text-sm font-normal">(ทั้งหมด ${S.students.length} · ชาย ${byGender(MALE).length} · หญิง ${byGender(FEMALE).length})</span></h2>
+    <div class="flex gap-2">
+      <button data-act="open-import" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-sm font-medium">⬆ นำเข้า Excel / CSV</button>
+      ${S.students.length ? '<button data-act="clear-students" class="px-3 py-2 border border-rose-200 text-rose-600 rounded-lg text-sm hover:bg-rose-50">ลบทั้งหมด</button>' : ''}
+    </div>
+  </div>
+  ${S.students.length ? `<div class="bg-white rounded-2xl border shadow-sm overflow-x-auto scroll-thin"><table class="w-full text-sm">
+    <thead><tr class="text-left text-slate-500 border-b bg-slate-50"><th class="p-3">รหัส</th><th>ชื่อ-นามสกุล</th><th>ชั้น/ห้อง</th><th>เพศ</th><th></th></tr></thead>
+    <tbody>${S.students.map(s => `<tr class="border-b last:border-0">
+      <td class="p-3 text-slate-500">${esc(s.id)}</td><td class="font-medium">${esc(s.name)}</td><td class="text-slate-500">${esc(s.cls)}</td>
+      <td><button data-act="toggle-gender" data-id="${esc(s.id)}" title="กดเพื่อสลับเพศ">${genderBadge(s.gender)}</button></td>
+      <td class="text-right pr-3"><button data-act="del-student" data-id="${esc(s.id)}" class="text-rose-500 hover:text-rose-700 text-xs">ลบ</button></td></tr>`).join('')}</tbody></table></div>
+    <p class="text-xs text-slate-400 mt-2">กดที่ป้ายเพศเพื่อสลับชาย/หญิงรายบุคคล</p>` : emptyBox('ยังไม่มีรายชื่อสมาชิก', 'กดปุ่มนำเข้าเพื่ออัปโหลดไฟล์ Excel หรือ CSV')}`;
+}
+
+function emptyBox(title, sub, extra = '') {
+  return `<div class="bg-white border rounded-2xl p-10 text-center"><p class="font-semibold">${title}</p><p class="text-sm text-slate-500 mt-1">${sub}</p>${extra}</div>`;
+}
+
+/* ---------- Modal ---------- */
+function openModal(html, wide = false) {
+  $('#modal').innerHTML = `<div class="fixed inset-0 z-50 bg-black/40 flex items-end sm:items-center justify-center p-0 sm:p-4" data-act="backdrop">
+    <div class="bg-white w-full ${wide ? 'sm:max-w-2xl' : 'sm:max-w-md'} max-h-[92vh] overflow-y-auto rounded-t-2xl sm:rounded-2xl p-5 shadow-xl">${html}</div></div>`;
+}
+const closeModal = () => $('#modal').innerHTML = '';
+
+function importModal() {
+  openModal(`
+    <h3 class="text-lg font-bold mb-1">นำเข้ารายชื่อสมาชิก</h3>
+    <p class="text-sm text-slate-500 mb-4">รองรับ .xlsx และ .csv · คอลัมน์: รหัสนักเรียน, ชื่อ-นามสกุล, ชั้น/ห้อง</p>
+    <p class="text-sm font-medium mb-2">1) เลือกเพศของรายชื่อชุดนี้</p>
+    <div class="grid grid-cols-2 gap-2 mb-4">
+      <label class="cursor-pointer"><input type="radio" name="ig" value="${MALE}" class="peer sr-only" ${S.importGender === MALE ? 'checked' : ''}><div class="text-center py-3 rounded-xl border-2 peer-checked:border-sky-500 peer-checked:bg-sky-50 peer-checked:text-sky-700 font-medium">♂ ชาย</div></label>
+      <label class="cursor-pointer"><input type="radio" name="ig" value="${FEMALE}" class="peer sr-only" ${S.importGender === FEMALE ? 'checked' : ''}><div class="text-center py-3 rounded-xl border-2 peer-checked:border-pink-500 peer-checked:bg-pink-50 peer-checked:text-pink-700 font-medium">♀ หญิง</div></label>
+    </div>
+    <p class="text-sm font-medium mb-2">2) เลือกไฟล์</p>
+    <input id="import-file" type="file" accept=".xlsx,.xls,.csv" class="block w-full text-sm border rounded-lg p-2 file:mr-3 file:px-3 file:py-1.5 file:rounded-md file:border-0 file:bg-indigo-50 file:text-indigo-700">
+    <button data-act="sample-csv" class="text-xs text-indigo-600 mt-2 underline">ดาวน์โหลดไฟล์ตัวอย่าง (CSV)</button>
+    <div id="import-preview" class="mt-4"></div>
+    <div class="flex justify-end gap-2 mt-5">
+      <button data-act="close-modal" class="px-4 py-2 rounded-lg border text-sm">ปิด</button>
+      <button id="import-btn" data-act="do-import" disabled class="px-4 py-2 rounded-lg bg-indigo-600 text-white text-sm font-medium disabled:opacity-40">นำเข้า</button>
+    </div>`, true);
+}
+function renderImportPreview() {
+  const rows = S.importRows;
+  $('#import-btn').disabled = !rows.length;
+  $('#import-preview').innerHTML = rows.length ? `
+    <p class="text-sm mb-2">พบ <b>${rows.length}</b> รายชื่อใน "${esc(S.importName)}" · จะระบุเป็น ${genderBadge(S.importGender)} ทั้งหมด</p>
+    <div class="border rounded-lg overflow-hidden"><table class="w-full text-xs"><thead class="bg-slate-50 text-slate-500"><tr><th class="p-2 text-left">รหัส</th><th class="text-left">ชื่อ-นามสกุล</th><th class="text-left">ชั้น</th></tr></thead>
+    <tbody>${rows.slice(0, 5).map(r => `<tr class="border-t"><td class="p-2">${esc(r.id)}</td><td>${esc(r.name)}</td><td>${esc(r.cls)}</td></tr>`).join('')}</tbody></table></div>
+    ${rows.length > 5 ? `<p class="text-xs text-slate-400 mt-1">…และอีก ${rows.length - 5} รายชื่อ</p>` : ''}` : '';
+}
+async function parseFile(file) {
+  const buf = await file.arrayBuffer();
+  const wb = XLSX.read(buf, { type: 'array' });
+  const data = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, defval: '' });
+  const norm = (v) => String(v).replace(/\s/g, '').toLowerCase();
+  let hIdx = -1, iId = 0, iName = 1, iCls = 2;
+  for (let i = 0; i < Math.min(data.length, 10); i++) {
+    const r = data[i].map(norm);
+    const a = r.findIndex(c => /รหัส|^id$|studentid/.test(c));
+    const b = r.findIndex(c => /ชื่อ|name/.test(c));
+    if (a >= 0 || b >= 0) {
+      hIdx = i;
+      if (a >= 0) iId = a; if (b >= 0) iName = b;
+      const c = r.findIndex(c => /ชั้น|ห้อง|class|room/.test(c)); if (c >= 0) iCls = c;
+      break;
+    }
+  }
+  const rows = [];
+  data.slice(hIdx + 1).forEach((r, n) => {
+    const name = String(r[iName] ?? '').trim(); if (!name) return;
+    let id = String(r[iId] ?? '').trim().replace(/\//g, '-');
+    if (!id) id = 'S' + Date.now().toString(36) + n;
+    rows.push({ id, name, cls: String(r[iCls] ?? '').trim() });
+  });
+  return rows;
+}
+
+function settingsModal() {
+  openModal(`
+    <h3 class="text-lg font-bold mb-2">ตั้งค่า Firebase</h3>
+    <div class="text-sm text-slate-600 space-y-1.5 mb-3">
+      <p>1. สร้างโปรเจกต์ที่ <b>console.firebase.google.com</b></p>
+      <p>2. สร้าง <b>Firestore Database</b> (เริ่มด้วย Test mode)</p>
+      <p>3. Project settings → Your apps → Web → ก๊อปค่า <code class="bg-slate-100 px-1 rounded">firebaseConfig</code></p>
+      <p>4. วางด้านล่าง (เป็น JSON) หรือใส่ในตัวแปร <code class="bg-slate-100 px-1 rounded">FIREBASE_CONFIG</code> ในไฟล์ index.html</p>
+      <p class="text-amber-700 bg-amber-50 rounded-lg p-2">แนะนำให้ตั้ง Firestore Rules และ Authentication ให้เหมาะสมก่อนใช้งานจริง</p>
+    </div>
+    <textarea id="cfg-text" rows="7" class="w-full px-3 py-2 rounded-lg border font-mono text-xs" placeholder='{"apiKey":"...","authDomain":"...","projectId":"...","appId":"..."}'>${esc(localStorage.getItem('club_fb_config') || '')}</textarea>
+    <div class="flex justify-between gap-2 mt-4">
+      <button data-act="reset-cfg" class="px-3 py-2 rounded-lg border text-sm text-slate-600">กลับโหมดทดลอง</button>
+      <div class="flex gap-2"><button data-act="close-modal" class="px-4 py-2 rounded-lg border text-sm">ปิด</button>
+      <button data-act="save-cfg" class="px-4 py-2 rounded-lg bg-indigo-600 text-white text-sm font-medium">บันทึกและรีโหลด</button></div>
+    </div>`, true);
+}
+
+/* ============================ Events ============================ */
+document.addEventListener('click', async (e) => {
+  const el = e.target.closest('[data-act]'); if (!el) return;
+  const act = el.dataset.act, id = el.dataset.id;
+  if (act === 'backdrop') { if (e.target === el) closeModal(); return; }
+  try {
+    switch (act) {
+      case 'view': S.view = el.dataset.v; render(); break;
+      case 'goto-weeks': S.view = 'weeks'; render(); break;
+      case 'gender-tab': S.gender = el.dataset.g; render(); break;
+      case 'dash-gender': S.dashGender = el.dataset.g; render(); break;
+      case 'scope': S.dashScope = el.dataset.v; render(); break;
+      case 'prev-week': case 'next-week': {
+        const i = S.weeks.findIndex(w => w.id === S.weekId) + (act === 'next-week' ? 1 : -1);
+        if (S.weeks[i]) { S.weekId = S.weeks[i].id; render(); } break;
+      }
+      case 'set-status': {
+        const w = currentWeek(); const same = recOf(w, id) === el.dataset.s;
+        await Store.setRecords(w.id, { [id]: same ? null : el.dataset.s }); break;
+      }
+      case 'mark-all': {
+        const list = byGender(S.gender); if (!list.length) return toast('ไม่มีรายชื่อในกลุ่มนี้', false);
+        const map = {}; list.forEach(s => map[s.id] = 'present');
+        await Store.setRecords(S.weekId, map);
+        toast(`บันทึก "มา" ให้ ${S.gender === 'all' ? 'ทุกคน' : 'นักเรียน' + S.gender} ${list.length} คน`); break;
+      }
+      case 'clear-all': {
+        const list = byGender(S.gender); if (!list.length || !confirm(`ล้างผลเช็คชื่อของ ${list.length} คนในกลุ่มที่แสดงอยู่?`)) return;
+        const map = {}; list.forEach(s => map[s.id] = null); await Store.setRecords(S.weekId, map); break;
+      }
+      case 'add-week': weekModal(); break;
+      case 'edit-week': weekModal(id); break;
+      case 'check-week': S.weekId = id; S.view = 'attendance'; render(); break;
+      case 'save-week': {
+        const num = +el.dataset.num;
+        const sup = $('#w-sup').value.split(/[,\n]/).map(x => x.trim()).filter(Boolean);
+        await Store.saveWeek({ id: id || 'week-' + String(num).padStart(3, '0'), number: num, date: $('#w-date').value, topic: $('#w-topic').value.trim(), supervisors: sup });
+        if (!id) S.weekId = 'week-' + String(num).padStart(3, '0');
+        closeModal(); toast('บันทึกสัปดาห์แล้ว'); break;
+      }
+      case 'del-week': if (confirm('ลบสัปดาห์นี้พร้อมผลเช็คชื่อทั้งหมดของสัปดาห์?')) await Store.deleteWeek(id); break;
+      case 'open-import': S.importRows = []; importModal(); break;
+      case 'sample-csv': {
+        const csv = '\uFEFFรหัสนักเรียน,ชื่อ-นามสกุล,ชั้น/ห้อง\n12345,เด็กชายสมชาย ใจดี,ม.1/1\n12346,เด็กชายสมศักดิ์ รักเรียน,ม.1/2\n';
+        const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' })); a.download = 'ตัวอย่างรายชื่อ.csv'; a.click(); break;
+      }
+      case 'do-import': {
+        const gender = (document.querySelector('input[name=ig]:checked') || {}).value || MALE;
+        const list = S.importRows.map(r => ({ ...r, gender }));
+        el.disabled = true; el.textContent = 'กำลังนำเข้า...';
+        await Store.addStudents(list); closeModal(); toast(`นำเข้า ${list.length} รายชื่อ (${gender}) สำเร็จ`); break;
+      }
+      case 'toggle-gender': { const s = S.students.find(x => x.id === id); await Store.setGender(id, s.gender === MALE ? FEMALE : MALE); break; }
+      case 'del-student': if (confirm('ลบสมาชิกคนนี้?')) await Store.deleteStudent(id); break;
+      case 'clear-students': if (confirm('ลบรายชื่อสมาชิกทั้งหมด? (ผลเช็คชื่อเดิมจะไม่ถูกนับในสถิติ)')) await Store.clearStudents(); break;
+      case 'open-settings': settingsModal(); break;
+      case 'save-cfg': {
+        try { const c = JSON.parse($('#cfg-text').value); if (!c.apiKey || !c.projectId) throw 0; localStorage.setItem('club_fb_config', JSON.stringify(c)); location.reload(); }
+        catch (_) { toast('JSON ไม่ถูกต้อง หรือขาด apiKey / projectId', false); } break;
+      }
+      case 'reset-cfg': localStorage.removeItem('club_fb_config'); location.reload(); break;
+      case 'close-modal': closeModal(); break;
+    }
+  } catch (err) { console.error(err); toast('เกิดข้อผิดพลาด: ' + err.message, false); }
+});
+
+document.addEventListener('change', async (e) => {
+  if (e.target.matches('[data-act="select-week"]')) { S.weekId = e.target.value; render(); }
+  if (e.target.id === 'import-file' && e.target.files[0]) {
+    try { S.importRows = await parseFile(e.target.files[0]); S.importName = e.target.files[0].name; renderImportPreview(); if (!S.importRows.length) toast('ไม่พบรายชื่อในไฟล์', false); }
+    catch (err) { console.error(err); toast('อ่านไฟล์ไม่สำเร็จ', false); }
+  }
+  if (e.target.name === 'ig') { S.importGender = e.target.value; if (S.importRows.length) renderImportPreview(); }
+});
+document.addEventListener('input', (e) => {
+  if (e.target.id === 'search') { S.search = e.target.value; $('#list').innerHTML = attendanceList(); }
+});
+
+/* ============================ Start ============================ */
+Store.init();
+render();
+</script>
+</body>
+</html>
