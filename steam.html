@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ระบบเช็คชื่อนักเรียน Real-time</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- SheetJS สำหรับไฟล์ Excel -->
+    <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+    <!-- Font Prompt -->
+    <link href="https://fonts.googleapis.com/css2?family=Prompt:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Prompt', sans-serif; }
+    </style>
+</head>
+<body class="bg-slate-100 min-h-screen p-3 sm:p-6">
+
+    <div class="max-w-5xl mx-auto bg-white rounded-2xl shadow-xl overflow-hidden border border-slate-200">
+        
+        <!-- Header Section -->
+        <div class="bg-slate-900 text-white p-5 sm:p-6">
+            <div class="flex flex-col sm:flex-row justify-between items-center gap-4">
+                <div>
+                    <h1 class="text-2xl sm:text-3xl font-bold flex items-center gap-2">
+                        <span>📋</span> ระบบเช็คชื่อนักเรียน
+                    </h1>
+                    <p class="text-slate-400 text-xs sm:text-sm mt-1">ซิงค์ข้อมูลเรียลไทม์ผ่านระบบ Cloud (Firebase)</p>
+                </div>
+                <!-- แสดงสถานะการเชื่อมต่อ -->
+                <div id="status" class="px-4 py-2 rounded-full text-xs font-semibold bg-yellow-500/20 text-yellow-300 border border-yellow-500/30 flex items-center gap-2">
+                    <span class="w-2 h-2 rounded-full bg-yellow-400 animate-pulse"></span>
+                    กำลังเชื่อมต่อ Cloud...
+                </div>
+            </div>
+        </div>
+
+        <!-- Action Control Panel -->
+        <div class="p-4 sm:p-6 bg-slate-50 border-b border-slate-200">
+            <div class="flex flex-wrap items-center justify-between gap-3">
+                <div class="flex flex-wrap gap-2 w-full sm:w-auto">
+                    <input type="file" id="excelFile" accept=".xlsx, .xls" class="hidden" onchange="importExcel(event)">
+                    <button onclick="document.getElementById('excelFile').click()" class="flex-1 sm:flex-none inline-flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2.5 rounded-xl text-sm font-medium transition shadow-sm active:scale-95">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
+                        นำเข้า Excel
+                    </button>
+                    <button onclick="exportExcel()" class="flex-1 sm:flex-none inline-flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2.5 rounded-xl text-sm font-medium transition shadow-sm active:scale-95">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/></svg>
+                        ส่งออก Excel
+                    </button>
+                </div>
+                <button onclick="clearAllData()" class="w-full sm:w-auto inline-flex items-center justify-center gap-2 bg-rose-50 text-rose-600 hover:bg-rose-100 border border-rose-200 px-4 py-2.5 rounded-xl text-sm font-medium transition active:scale-95">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+                    ล้างข้อมูลทั้งหมด
+                </button>
+            </div>
+        </div>
+
+        <!-- Student List Table -->
+        <div class="overflow-x-auto">
+            <table class="w-full text-left border-collapse">
+                <thead>
+                    <tr class="bg-slate-100 text-slate-600 text-xs uppercase tracking-wider font-semibold border-b border-slate-200">
+                        <th class="p-4 text-center w-16">ลำดับ</th>
+                        <th class="p-4 w-36">รหัสนักเรียน</th>
+                        <th class="p-4">ชื่อ - นามสกุล</th>
+                        <th class="p-4 text-center w-48">สถานะการมาเรียน</th>
+                    </tr>
+                </thead>
+                <tbody id="studentTable" class="divide-y divide-slate-200 text-slate-700 text-sm">
+                    <tr>
+                        <td colspan="4" class="p-8 text-center text-slate-400 font-light">
+                            กำลังโหลดข้อมูล...
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <!-- Table Footer Summary -->
+        <div id="summaryFooter" class="p-4 bg-slate-50 border-t border-slate-200 text-xs text-slate-500 flex flex-wrap justify-between items-center gap-2">
+            <span>รวมทั้งหมด: <strong id="totalCount" class="text-slate-800">0</strong> คน</span>
+            <div class="flex gap-3">
+                <span class="text-emerald-600 font-medium">มา: <span id="countPresent">0</span></span>
+                <span class="text-amber-600 font-medium">สาย: <span id="countLate">0</span></span>
+                <span class="text-rose-600 font-medium">ขาด: <span id="countAbsent">0</span></span>
+                <span class="text-sky-600 font-medium">ลา: <span id="countLeave">0</span></span>
+            </div>
+        </div>
+
+    </div>
+
+    <!-- Firebase SDK Modules -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
+        import { getFirestore, doc, setDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
+
+        // คอนฟิก Firebase จากโปรเจกต์ของคุณ
+        const firebaseConfig = {
+            apiKey: "AIzaSyAp_4sj7XEQ-zK9lvFobtJIWnSaxXW4yWk",
+            authDomain: "steam-ba72b.firebaseapp.com",
+            projectId: "steam-ba72b",
+            storageBucket: "steam-ba72b.firebasestorage.app",
+            messagingSenderId: "803240609180",
+            appId: "1:803240609180:web:7b08c17c1b452b1c61b459",
+            measurementId: "G-P3LZZ6JB2Y"
+        };
+
+        // เริ่มต้นใช้งาน Firebase & Firestore
+        const app = initializeApp(firebaseConfig);
+        const db = getFirestore(app);
+        const docRef = doc(db, "attendance", "current_list");
+
+        let studentsData = [];
+
+        // ติดตามการเปลี่ยนแปลงข้อมูลบน Cloud แบบ Real-time
+        onSnapshot(docRef, (docSnap) => {
+            const statusDiv = document.getElementById('status');
+            if (docSnap.exists()) {
+                studentsData = docSnap.data().students || [];
+                renderTable();
+                statusDiv.className = "px-4 py-2 rounded-full text-xs font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 flex items-center gap-2";
+                statusDiv.innerHTML = '<span class="w-2 h-2 rounded-full bg-emerald-400"></span> เชื่อมต่อ Real-time สำเร็จ';
+            } else {
+                studentsData = [];
+                renderTable();
+                statusDiv.className = "px-4 py-2 rounded-full text-xs font-semibold bg-sky-500/20 text-sky-300 border border-sky-500/30 flex items-center gap-2";
+                statusDiv.innerHTML = '<span class="w-2 h-2 rounded-full bg-sky-400"></span> พร้อมใช้งาน (คลาวด์ว่างเปล่า)';
+            }
+        }, (error) => {
+            console.error("Firestore Error:", error);
+            const statusDiv = document.getElementById('status');
+            statusDiv.className = "px-4 py-2 rounded-full text-xs font-semibold bg-rose-500/20 text-rose-300 border border-rose-500/30 flex items-center gap-2";
+            statusDiv.innerHTML = '<span class="w-2 h-2 rounded-full bg-rose-400"></span> การเชื่อมต่อล้มเหลว';
+        });
+
+        // ฟังก์ชันบันทึกข้อมูลขึ้น Cloud
+        async function saveDataToCloud(newData) {
+            try {
+                await setDoc(docRef, { students: newData });
+            } catch (e) {
+                alert("ไม่สามารถบันทึกข้อมูลไปยังคลาวด์ได้: " + e.message);
+            }
+        }
+
+        // ฟังก์ชันแสดงผลตาราง
+        window.renderTable = function() {
+            const tbody = document.getElementById('studentTable');
+            tbody.innerHTML = '';
+
+            if (studentsData.length === 0) {
+                tbody.innerHTML = `
+                    <tr>
+                        <td colspan="4" class="p-12 text-center text-slate-400">
+                            <div class="flex flex-col items-center gap-2">
+                                <span class="text-3xl">📂</span>
+                                <p class="font-medium text-slate-600">ยังไม่มีข้อมูลรายชื่อนักเรียน</p>
+                                <p class="text-xs">กดปุ่ม "นำเข้า Excel" ด้านบนเพื่อเริ่มเพิ่มรายชื่อ</p>
+                            </div>
+                        </td>
+                    </tr>`;
+                updateSummary();
+                return;
+            }
+
+            studentsData.forEach((student, index) => {
+                const tr = document.createElement('tr');
+                tr.className = "hover:bg-slate-50/80 transition-colors";
+                tr.innerHTML = `
+                    <td class="p-4 text-center font-medium text-slate-400">${index + 1}</td>
+                    <td class="p-4 font-mono text-slate-600">${student.id || '-'}</td>
+                    <td class="p-4 font-semibold text-slate-800">${student.name || '-'}</td>
+                    <td class="p-4 text-center">
+                        <select onchange="updateStatus(${index}, this.value)" class="w-full sm:w-32 px-3 py-1.5 rounded-lg text-xs font-semibold border transition cursor-pointer outline-none focus:ring-2 focus:ring-offset-1 ${getStatusStyle(student.status)}">
+                            <option value="มา" ${student.status === 'มา' ? 'selected' : ''}>🟢 มา</option>
+                            <option value="สาย" ${student.status === 'สาย' ? 'selected' : ''}>🟡 สาย</option>
+                            <option value="ขาด" ${student.status === 'ขาด' ? 'selected' : ''}>🔴 ขาด</option>
+                            <option value="ลา" ${student.status === 'ลา' ? 'selected' : ''}>🔵 ลา</option>
+                        </select>
+                    </td>
+                `;
+                tbody.appendChild(tr);
+            });
+
+            updateSummary();
+        };
+
+        // สไตล์ของ Select ตามสถานะ
+        function getStatusStyle(status) {
+            if (status === 'มา') return 'bg-emerald-50 text-emerald-700 border-emerald-200 focus:ring-emerald-400';
+            if (status === 'สาย') return 'bg-amber-50 text-amber-700 border-amber-200 focus:ring-amber-400';
+            if (status === 'ขาด') return 'bg-rose-50 text-rose-700 border-rose-200 focus:ring-rose-400';
+            if (status === 'ลา') return 'bg-sky-50 text-sky-700 border-sky-200 focus:ring-sky-400';
+            return 'bg-slate-50 text-slate-700 border-slate-200';
+        }
+
+        // อัปเดต สรุปจำนวนท้ายตาราง
+        function updateSummary() {
+            document.getElementById('totalCount').innerText = studentsData.length;
+            document.getElementById('countPresent').innerText = studentsData.filter(s => s.status === 'มา').length;
+            document.getElementById('countLate').innerText = studentsData.filter(s => s.status === 'สาย').length;
+            document.getElementById('countAbsent').innerText = studentsData.filter(s => s.status === 'ขาด').length;
+            document.getElementById('countLeave').innerText = studentsData.filter(s => s.status === 'ลา').length;
+        }
+
+        // เปลี่ยนสถานะนักเรียน
+        window.updateStatus = function(index, newStatus) {
+            studentsData[index].status = newStatus;
+            saveDataToCloud(studentsData);
+        };
+
+        // นำเข้าไฟล์ Excel
+        window.importExcel = function(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                try {
+                    const data = new Uint8Array(e.target.result);
+                    const workbook = XLSX.read(data, { type: 'array' });
+                    const firstSheetName = workbook.SheetNames[0];
+                    const worksheet = workbook.Sheets[firstSheetName];
+                    const jsonData = XLSX.utils.sheet_to_json(worksheet);
+
+                    const formattedData = jsonData.map(row => ({
+                        id: row['รหัสนักเรียน'] || row['ID'] || row['id'] || row['รหัส'] || '',
+                        name: row['ชื่อ-นามสกุล'] || row['ชื่อ'] || row['Name'] || row['name'] || '',
+                        status: row['สถานะ'] || 'มา'
+                    }));
+
+                    saveDataToCloud(formattedData);
+                    event.target.value = ''; // รีเซ็ต input file
+                } catch (err) {
+                    alert('เกิดข้อผิดพลาดในการอ่านไฟล์ Excel: ' + err.message);
+                }
+            };
+            reader.readAsArrayBuffer(file);
+        };
+
+        // ส่งออกไฟล์ Excel
+        window.exportExcel = function() {
+            if (studentsData.length === 0) {
+                alert('ไม่มีข้อมูลสำหรับส่งออก');
+                return;
+            }
+            const exportData = studentsData.map((s, idx) => ({
+                'ลำดับ': idx + 1,
+                'รหัสนักเรียน': s.id,
+                'ชื่อ-นามสกุล': s.name,
+                'สถานะการเช็คชื่อ': s.status
+            }));
+
+            const worksheet = XLSX.utils.json_to_sheet(exportData);
+            const workbook = XLSX.utils.book_new();
+            XLSX.utils.book_append_sheet(workbook, worksheet, "การเช็คชื่อ");
+            XLSX.writeFile(workbook, `รายงานการเช็คชื่อ_${new Date().toISOString().slice(0,10)}.xlsx`);
+        };
+
+        // ล้างข้อมูลทั้งหมด
+        window.clearAllData = function() {
+            if (confirm('คุณแน่ใจหรือไม่ว่าต้องการลบข้อมูลนักเรียนทั้งหมดจากคลาวด์?')) {
+                saveDataToCloud([]);
+            }
+        };
+    </script>
+</body>
+</html>
